@@ -10,13 +10,15 @@ Every feature is something known at month t.
 """
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction import DictVectorizer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_recall_curve
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier
+from xgboost import XGBClassifier
 
 HORIZONS = (1, 2, 3)
 TRAIN_END = 2015     # last predicted-month year used for training
@@ -33,7 +35,7 @@ WEATHER_NUM = ([c for w in WEATHER_BASE for c in (w, w + "_3m")]
 ALL_NUM = BASE_NUM + WEATHER_NUM
 FEATURES = ALL_NUM + CATEGORICAL
 
-DEFAULT_HGB_PARAMS = dict(max_iter=250, learning_rate=0.05, max_depth=4, random_state=1)
+MODEL_KINDS = ("logistic", "tree", "forest", "xgboost")
 
 
 # --------------------------------------------------------------------------
@@ -122,26 +124,45 @@ def split_by_target_year(d, train_end=TRAIN_END, val_end=VAL_END):
 # --------------------------------------------------------------------------
 # Models and metrics
 # --------------------------------------------------------------------------
-def make_model(kind, num_cols, params=None):
-    """kind: 'logistic', 'forest' or 'boosting'. `params` are passed to the classifier."""
+def to_records(df, num_cols=ALL_NUM):
+    """DataFrame -> list of dicts for DictVectorizer (as in the homeworks).
+
+    Missing numbers become NaN, which DictVectorizer keeps; the pipeline then
+    imputes them (or XGBoost handles them natively).
+    """
+    cols = list(num_cols) + CATEGORICAL
+    return df[cols].to_dict(orient="records")
+
+
+def make_model(kind, params=None):
+    """Pipeline: DictVectorizer -> (imputer, scaler) -> classifier.
+
+    kind: 'logistic' (baseline), 'tree', 'forest' or 'xgboost'.
+    `params` are passed to the classifier and override the defaults.
+    """
     params = dict(params or {})
+    dv = ("dv", DictVectorizer(sparse=False))
     if kind == "logistic":
-        num = Pipeline([("impute", SimpleImputer(strategy="median")), ("scale", StandardScaler())])
         clf = LogisticRegression(**{"C": 1.0, "max_iter": 2000, **params})
-    elif kind == "boosting":
-        num = "passthrough"                                  # boosting handles NaN itself
-        clf = HistGradientBoostingClassifier(**{**DEFAULT_HGB_PARAMS, **params})
-    elif kind == "forest":
-        num = SimpleImputer(strategy="median")
-        clf = RandomForestClassifier(**{"n_estimators": 300, "min_samples_leaf": 5, "n_jobs": -1,
+        steps = [dv, ("impute", SimpleImputer(strategy="median")),
+                 ("scale", StandardScaler()), ("clf", clf)]
+    elif kind == "tree":
+        clf = DecisionTreeClassifier(**{"max_depth": 5, "min_samples_leaf": 20,
                                         "random_state": 1, **params})
+        steps = [dv, ("impute", SimpleImputer(strategy="median")), ("clf", clf)]
+    elif kind == "forest":
+        clf = RandomForestClassifier(**{"n_estimators": 300, "min_samples_leaf": 5,
+                                        "n_jobs": -1, "random_state": 1, **params})
+        steps = [dv, ("impute", SimpleImputer(strategy="median")), ("clf", clf)]
+    elif kind == "xgboost":
+        clf = XGBClassifier(**{"n_estimators": 200, "learning_rate": 0.05, "max_depth": 4,
+                               "subsample": 0.8, "colsample_bytree": 0.8,
+                               "eval_metric": "logloss", "n_jobs": 2,
+                               "random_state": 1, **params})
+        steps = [dv, ("clf", clf)]                      # XGBoost handles NaN itself
     else:
-        raise ValueError(kind)
-    pre = ColumnTransformer([
-        ("num", num, num_cols),
-        ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CATEGORICAL),
-    ])
-    return Pipeline([("pre", pre), ("clf", clf)])
+        raise ValueError(f"unknown model kind: {kind}")
+    return Pipeline(steps)
 
 
 def best_f1_threshold(y, scores):

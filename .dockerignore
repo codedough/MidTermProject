@@ -5,3 +5,8 @@ __pycache__
 .ipynb_checkpoints
 notebook.ipynb
 data/
+pyproject.toml
+uv.lock
+requirements-notebook.txt
+model_params.json
+*.zip
